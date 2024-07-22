@@ -1,0 +1,175 @@
+# SwitchAudioDevicesV2.ps1
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# Author: Henry Albert Steele III
+# Github: https://github.com/Henry-Steele
+# Year: 2024
+
+# Load necessary assemblies
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName System.Windows.Forms
+
+# Hide the PowerShell console window
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+}
+"@
+$consolePtr = [Win32]::GetConsoleWindow()
+[Win32]::ShowWindow($consolePtr, 0) # 0 = SW_HIDE
+
+# Check if the module is installed
+if (-not (Get-Module -ListAvailable -Name AudioDeviceCmdlets)) {
+    $response = [System.Windows.MessageBox]::Show("The AudioDeviceCmdlets module is not installed. Would you like to install it now?", "Module Not Found", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($response -eq [System.Windows.MessageBoxResult]::Yes) {
+        Install-Module -Name AudioDeviceCmdlets -Scope CurrentUser -Force | Out-Null
+        if (-not (Get-Module -ListAvailable -Name AudioDeviceCmdlets)) {
+            [System.Windows.MessageBox]::Show("Failed to install AudioDeviceCmdlets module. Exiting.", "Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+            exit
+        }
+    } else {
+        [System.Windows.MessageBox]::Show("AudioDeviceCmdlets module is required. Exiting.", "Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+        exit
+    }
+}
+
+Import-Module AudioDeviceCmdlets | Out-Null
+
+function Get-AudioDevices {
+    Get-AudioDevice -List | Where-Object { $_.Type -eq 'Playback' }
+}
+
+function Get-DefaultAudioDevice {
+    (Get-AudioDevice -Playback).Name
+}
+
+function Get-DefaultCommunicationDevice {
+    (Get-AudioDevice -PlaybackCommunication).Name
+}
+
+function Set-DefaultAudioDevice {
+    param (
+        [int]$deviceIndex
+    )
+    Set-AudioDevice -Index $deviceIndex -DefaultOnly | Out-Null
+}
+
+function Set-DefaultCommunicationDevice {
+    param (
+        [int]$deviceIndex
+    )
+    Set-AudioDevice -Index $deviceIndex -CommunicationOnly | Out-Null
+}
+
+# Initialize GUI components
+[xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Audio Device Switcher" Height="300" Width="400">
+    <Grid>
+        <StackPanel Margin="10">
+            <TextBlock Text="Select Audio Output Device:" Margin="0,0,0,10"/>
+            <ComboBox Name="DeviceComboBox" Width="300"/>
+            <CheckBox Name="DefaultDeviceCheckBox" Content="Set as Default Device" Margin="0,10,0,0"/>
+            <CheckBox Name="CommDeviceCheckBox" Content="Set as Default Communication Device" Margin="0,10,0,0"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+                <Button Name="RefreshButton" Content="Refresh" Width="75" Margin="0,0,10,0"/>
+                <Button Name="ConfirmButton" Content="Switch" Width="75"/>
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>
+"@
+
+$reader = (New-Object System.Xml.XmlNodeReader $xaml)
+$Window = [Windows.Markup.XamlReader]::Load($reader)
+
+# Get controls
+$DeviceComboBox = $Window.FindName("DeviceComboBox")
+$DefaultDeviceCheckBox = $Window.FindName("DefaultDeviceCheckBox")
+$CommDeviceCheckBox = $Window.FindName("CommDeviceCheckBox")
+$RefreshButton = $Window.FindName("RefreshButton")
+$ConfirmButton = $Window.FindName("ConfirmButton")
+
+# Store device index mapping
+$global:deviceIndexMap = @{}
+
+function Refresh-DeviceList {
+    try {
+        $DeviceComboBox.Items.Clear()
+        $global:deviceIndexMap.Clear()
+        $devices = Get-AudioDevices
+        if ($devices.Count -eq 0) {
+            [System.Windows.MessageBox]::Show("No audio devices found.", "Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+            return
+        }
+        foreach ($device in $devices) {
+            $DeviceComboBox.Items.Add($device.Name)
+            $global:deviceIndexMap[$device.Name] = $device.Index
+        }
+        $defaultDevice = Get-DefaultAudioDevice
+        $defaultCommDevice = Get-DefaultCommunicationDevice
+        $DeviceComboBox.SelectedItem = $defaultDevice
+        $DefaultDeviceCheckBox.IsChecked = $true
+
+        if ($defaultDevice -eq $defaultCommDevice) {
+            $CommDeviceCheckBox.IsChecked = $true
+        } else {
+            $CommDeviceCheckBox.IsChecked = $false
+        }
+
+    } catch {
+        [System.Windows.MessageBox]::Show("Error retrieving audio devices: $_", "Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+    }
+}
+
+$RefreshButton.Add_Click({ Refresh-DeviceList | Out-Null })
+$ConfirmButton.Add_Click({
+    try {
+        if (-not $DefaultDeviceCheckBox.IsChecked -and -not $CommDeviceCheckBox.IsChecked) {
+            [System.Windows.MessageBox]::Show("Please select at least one option: Default Device or Default Communication Device.", "Selection Required", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
+            return
+        }
+
+        $selectedDeviceName = $DeviceComboBox.SelectedItem
+        $deviceIndex = $global:deviceIndexMap[$selectedDeviceName]
+
+        if ($DefaultDeviceCheckBox.IsChecked -eq $true) {
+            Set-DefaultAudioDevice -deviceIndex $deviceIndex
+        }
+        
+        if ($CommDeviceCheckBox.IsChecked -eq $true) {
+            Set-DefaultCommunicationDevice -deviceIndex $deviceIndex
+        }
+
+        $Window.Close()
+    } catch {
+        [System.Windows.MessageBox]::Show("Error setting audio device: $_", "Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+    }
+})
+
+# Initial population of devices
+$null = Refresh-DeviceList
+
+# Show the window
+$null = $Window.ShowDialog()
+
+# Close PowerShell window after script execution
+Stop-Process -Id $PID
